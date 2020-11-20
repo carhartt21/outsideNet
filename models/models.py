@@ -24,43 +24,7 @@ class SegmentationModuleBase(nn.Module):
         return acc
 
 
-class SegmentationModule(SegmentationModuleBase):
-    def __init__(self, net_enc, net_dec, crit, deep_sup_scale=None):
-        super(SegmentationModule, self).__init__()
-        self.encoder = net_enc
-        self.decoder = net_dec
-        self.crit = crit
-        self.deep_sup_scale = deep_sup_scale
-
-    def forward(self, feed_dict, *, seg_size=None):
-        # training
-        if type(feed_dict) is list:
-            feed_dict = feed_dict[0]
-            # also, convert to torch.cuda.FloatTensor
-            if torch.cuda.is_available():
-                feed_dict['img_data'] = feed_dict['img_data'].cuda()
-                feed_dict['seg_label'] = feed_dict['seg_label'].cuda()
-            else:
-                raise RuntimeError('Cannot convert torch.Floattensor into torch.cuda.FloatTensor')
-        if self.training:
-            if self.deep_sup_scale is not None:  # use deep supervision technique
-                (pred, pred_deepsup) = self.decoder(self.encoder(feed_dict['img_data'], return_feature_maps=True), seg_size=seg_size)
-            else:
-                pred = self.decoder(self.encoder(feed_dict['img_data'], return_feature_maps=True), seg_size=seg_size)
-            loss = self.crit(pred, feed_dict['seg_label'])
-            if self.deep_sup_scale is not None:
-                loss_deepsup = self.crit(pred_deepsup, feed_dict['seg_label'])
-                loss = loss + loss_deepsup * self.deep_sup_scale
-            acc = self.pixel_acc(pred, feed_dict['seg_label'])
-            return loss, acc
-        # inference
-        else:
-            pred = self.decoder(self.encoder(feed_dict['img_data'], return_feature_maps=True), seg_size=seg_size)
-            return pred
-
-
-class ModelBuilder:
-    # custom weights initialization
+class SegmentationModule(SegmentationModuleBase): 
     @staticmethod
     def weights_init(m):
         classname = m.__class__.__name__
@@ -70,11 +34,60 @@ class ModelBuilder:
             m.weight.data.fill_(1.)
             m.bias.data.fill_(1e-4)
 
+    def __init__(self, crit, num_class=24, weights_resNet='', weights='', spatial_mask=False,
+                 use_softmax=True):
+        super(SegmentationModule, self).__init__()
+        pretrained = True if len(weights) == 0 else False
+        orig_resnet = resnet.__dict__['resnet50'](pretrained=False)
+        self.backbone = Resnet(orig_resnet)
+        self.mlp = multi_level_pooling()
+        self.ff = feature_fusion(num_class=num_class, spatial_mask=spatial_mask, use_softmax=use_softmax)
+        
+        net_encoder.apply(ModelBuilder.weights_init)
+        # encoders are usually pretrained
+        if len(weights) > 0:
+            print('Loading weights for net_encoder')
+            net_encoder.load_state_dict(
+                torch.load(weights, map_location=lambda storage, loc: storage), strict=False)
+        net_decoder.apply(ModelBuilder.weights_init)
+        if len(weights) > 0:
+            logger.info('Loading weights for backbone')
+            net_decoder.load_state_dict(
+                torch.load(weights, map_location=lambda storage, loc: storage), strict=False)
+
+        self.crit = crit
+
+    def forward(self, feed_dict, *, label_size=None):
+        # training
+        if type(feed_dict) is list:
+            feed_dict = feed_dict[0]
+            # convert to torch.cuda.FloatTensor
+            if torch.cuda.is_available():
+                feed_dict['img_data'] = feed_dict['img_data'].cuda()
+                feed_dict['label_data'] = feed_dict['label_data'].cuda()
+            else:
+                raise RuntimeError('Cannot convert torch.Floattensor into torch.cuda.FloatTensor')
+        if self.training:
+            pred = self.decoder(self.encoder(feed_dict['img_data'], return_feature_maps=True), label_size=label_size)
+            loss = self.crit(pred, feed_dict['label_data'])
+            acc = self.pixel_acc(pred, feed_dict['label_data'])
+            return loss, acc
+        # inference
+        else:
+            pred = self.ff(
+                self.mlp(
+                    self.encoder(feed_dict['img_data'], return_feature_maps=True), label_size=label_size))
+            return pred
+
+
+class ModelBuilder:
+   
+
     @staticmethod
     def build_encoder(arch='resnet50dilated', fc_dim=512, weights='', spatial_mask=False, align_corners=False):
         pretrained = True if len(weights) == 0 else False
         arch = arch.lower()
-        elif arch == 'resnet50':
+        if arch == 'resnet50':
             orig_resnet = resnet.__dict__['resnet50'](pretrained=False)
             net_encoder = Resnet(orig_resnet)
         elif arch == 'resnet50dilated':
@@ -101,7 +114,7 @@ class ModelBuilder:
     def build_decoder(arch='outsideNet',
                       fc_dim=512, num_class=150,
                       weights='', use_softmax=False,
-                      align_corners=False, use_gt=False):
+                      align_corners=False):
         arch = arch.lower()
         if arch == 'c1':
             net_decoder = C1(
@@ -256,13 +269,13 @@ class C1(nn.Module):
         # last conv
         self.conv_last = nn.Conv2d(fc_dim // 4, num_class, 1, 1, 0)
 
-    def forward(self, conv_out, seg_size=None):
+    def forward(self, conv_out, label_size=None):
         conv5 = conv_out[-1]
         x = self.cbr(conv5)
         x = self.conv_last(x)
         if self.use_softmax:  # is True during inference
             x = nn.functional.interpolate(
-                x, size=seg_size, mode='bilinear', align_corners=False)
+                x, size=label_size, mode='bilinear', align_corners=False)
             x = nn.functional.softmax(x, dim=1)
         else:
             x = nn.functional.log_softmax(x, dim=1)
@@ -270,18 +283,16 @@ class C1(nn.Module):
 
 
 # outsideNet
-class outsideNet(nn.Module):
-    def __init__(self, num_class=24, fc_dim=2048,
-                 use_softmax=False, pool_scales=(1, 2, 4, 8),
-                 fpn_inplanes=(256, 512, 1024, 2048), fpn_dim=512):
-        super(UPerNet, self).__init__()
-        self.use_softmax = use_softmax
+class multi_level_pooling(nn.Module):
+    def __init__(self, fc_dim=2048,
+                 use_softmax=False, scales=(1, 2, 4, 8),
+        super(multi_level_pooling, self).__init__()
 
         # Multi-Level Pooling
         self.mlp_pooling_layers = []
         self.mlp_conv_layers = []
 
-        for scale in pool_scales:
+        for scale in scales:
             self.mlp_pooling_layers.append(nn.AdaptiveAvgPool2d(scale))
             self.mlp_conv_layers.append(nn.Sequential(
                 nn.Conv2d(fc_dim, 512, kernel_size=1, bias=False),
@@ -290,7 +301,28 @@ class outsideNet(nn.Module):
             ))
         self.mlp_pooling_layers = nn.ModuleList(self.mlp_pooling_layers)
         self.mlp_conv_layers = nn.ModuleList(self.mlp_conv_layers)
-        self.mlp_last_conv = conv3x3_bn_relu(fc_dim + len(pool_scales) * 512, fpn_dim, 1)
+        self.mlp_last_conv = conv3x3_bn_relu(fc_dim + len(scales) * 512, fpn_dim, 1)
+
+    def forward(self, conv_out, label_size=None):
+        conv5 = conv_out[-1]
+
+        input_size = conv5.size()
+        mlp_out = [conv5]
+        for pool_scale, pool_conv in zip(self.mlp_pooling_layers, self.mlp_conv_layers):
+            mlp_out.append(pool_conv(nn.functional.interpolate(
+                pool_scale(conv5),
+                (input_size[2], input_size[3]),
+                mode='bilinear', align_corners=False)))
+        mlp_out = torch.cat(mlp_out, 1)
+        f = self.mlp_last_conv(mlp_out)
+
+        return f
+
+class feature_fusion(nn.Module):
+    def __init__(self, num_class=24, fc_dim=2048,
+                 use_softmax=False, fpn_inplanes=(256, 512, 1024, 2048), fpn_dim=512):
+        super(feature_fusion, self).__init__()
+        self.use_softmax = use_softmax
 
         # FPN Module
         self.fpn_in = []
@@ -312,18 +344,8 @@ class outsideNet(nn.Module):
             nn.Conv2d(fpn_dim, num_class, kernel_size=1)
         )
 
-    def forward(self, conv_out, seg_size=None):
+    def forward(self, conv_out, label_size=None):
         conv5 = conv_out[-1]
-
-        input_size = conv5.size()
-        mlp_out = [conv5]
-        for pool_scale, pool_conv in zip(self.mlp_pooling_layers, self.mlp_conv_layers):
-            mlp_out.append(pool_conv(nn.functional.interpolate(
-                pool_scale(conv5),
-                (input_size[2], input_size[3]),
-                mode='bilinear', align_corners=False)))
-        mlp_out = torch.cat(mlp_out, 1)
-        f = self.mlp_last_conv(mlp_out)
 
         fpn_feature_list = [f]
         for i in reversed(range(len(conv_out) - 1)):
@@ -349,10 +371,11 @@ class outsideNet(nn.Module):
 
         if self.use_softmax:  # is True during inference
             x = nn.functional.interpolate(
-                x, size=seg_size, mode='bilinear', align_corners=False)
+                x, size=label_size, mode='bilinear', align_corners=False)
             x = nn.functional.softmax(x, dim=1)
             return x
 
         x = nn.functional.log_softmax(x, dim=1)
 
         return x
+

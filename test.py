@@ -12,6 +12,7 @@ import logging
 # Our libs
 from dataset import TestDataset
 from models import ModelBuilder, SegmentationModule
+from model import outsideNet
 from utils import colorEncode, find_recursive, setup_logger
 from lib.nn import user_scattered_collate, async_copy_to
 from lib.utils import as_numpy
@@ -59,12 +60,12 @@ def test(segmentation_module, loader, gpu):
     for batch_data in loader:
         # process data
         batch_data = batch_data[0]
-        seg_size = (batch_data['img_ori'].shape[0],
+        label_size = (batch_data['img_ori'].shape[0],
                     batch_data['img_ori'].shape[1])
         img_resized_list = batch_data['img_data']
 
         with torch.no_grad():
-            scores = torch.zeros(1, cfg.DATASET.num_class, seg_size[0], seg_size[1])
+            scores = torch.zeros(1, cfg.DATASET.num_class, label_size[0], label_size[1])
             scores = async_copy_to(scores, gpu)
 
             for img in img_resized_list:
@@ -74,7 +75,7 @@ def test(segmentation_module, loader, gpu):
                 del feed_dict['info']
                 feed_dict = async_copy_to(feed_dict, gpu)
                 # forward pass
-                pred_tmp = segmentation_module(feed_dict, seg_size=seg_size)
+                pred_tmp = segmentation_module(feed_dict, label_size=label_size)
                 scores += pred_tmp / len(cfg.DATASET.imgSizes)
             _, pred = torch.max(scores, dim=1)
             pred = as_numpy(pred.squeeze(0).cpu())
@@ -86,22 +87,18 @@ def test(segmentation_module, loader, gpu):
 
 def main(cfg, gpu):
     torch.cuda.set_device(gpu)
-
-    # Network Builders
-    net_encoder = ModelBuilder.build_encoder(
-        arch=cfg.MODEL.arch_encoder,
-        fc_dim=cfg.MODEL.fc_dim,
-        weights=cfg.MODEL.weights_encoder,
-        spatial_mask=cfg.MODEL.spatial_mask)
-    net_decoder = ModelBuilder.build_decoder(
-        arch=cfg.MODEL.arch_decoder,
-        fc_dim=cfg.MODEL.fc_dim,
-        num_class=cfg.DATASET.num_class,
-        weights=cfg.MODEL.weights_decoder,
-        use_softmax=True)
+    dump_model = False
 
     crit = nn.NLLLoss(ignore_index=-1)
-    segmentation_module = SegmentationModule(net_encoder, net_decoder, crit)
+    network = outsideNet(
+        crit,
+        fc_dim=cfg.MODEL.fc_dim,
+        num_class=cfg.DATASET.num_class,
+        weights_resNet=cfg.MODEL.weights_encoder,
+        weights=cfg.MODEL.weights_decoder,
+        spatial_mask=cfg.MODEL.spatial_mask,
+        use_softmax=True
+    )
 
     # Dataset and Loader
     dataset_test = TestDataset(
@@ -116,14 +113,15 @@ def main(cfg, gpu):
         num_workers=5,
         drop_last=True)
 
-    segmentation_module.cuda()
+    network.cuda()
 
-    dump_input = torch.rand((1, 3, 1920, 1080))
-    with open('dump_model_3.txt', 'w') as file:
-        file.write(get_model_summary(segmentation_module.cuda(), dump_input.cuda(), verbose=True))
+    if dump_model:
+        dump_input = torch.rand((1, 3, 1920, 1080))
+        with open('dump_model.txt', 'w') as file:
+            file.write(get_model_summary(network.cuda(), dump_input.cuda(), verbose=True))
 
     # Main loop
-    test(segmentation_module, loader_test, gpu)
+    test(network, loader_test, gpu)
 
     print('Inference done!')
 
@@ -169,9 +167,6 @@ if __name__ == '__main__':
     logger = setup_logger(distributed_rank=0)   # TODO
     logger.info("Loaded configuration file {}".format(args.cfg))
     logger.info("Running with config:\n{}".format(cfg))
-
-    cfg.MODEL.arch_encoder = cfg.MODEL.arch_encoder.lower()
-    cfg.MODEL.arch_decoder = cfg.MODEL.arch_decoder.lower()
 
     # absolute paths of model weights
     cfg.MODEL.weights_encoder = os.path.join(
