@@ -1,24 +1,22 @@
-DATASET:
+DATA:
   root_dataset: "./data/"
   list_train: "./data/outside15k_train.odgt"
   list_val: "./data/example_image_list.odgt"
   list_stats: "./data/outside15k_val.odgt"
   num_class: 24
-  imgSizes: (300, 400, 500, 600, 700, 800)
-  imgMaxSize: 1100
+  img_sizes: (300, 400, 500, 600, 700, 800)
+  img_max_size: 1100
   padding_constant: 32
   segm_downsampling_rate: 4
   random_flip: True
   random_crop: True
-  classInfo: "./data/outside15k.json"
+  class_info: "./data/outside15k.json"
   
 MODEL:
   arch_encoder: "resnet50"
   arch_decoder: "outsideNet"
   fc_dim: 2048
-#  weights_encoder: "./ckpt/ade20k-hrnetv2-ocr_2/encoder_epoch_30.pth"
-#  weights_encoder: "./ckpt/ade20k-hrnetv2-ocr_2/decoder_epoch_30.pth"
-  spatial_mask: False
+  spatial_mask: True
 
 TRAIN:
   batch_size_per_gpu: 2
@@ -37,12 +35,14 @@ TRAIN:
   disp_iter: 50
   eval: False
 
-VAL:
-  checkpoint: "epoch_60.pth"
+EVAL:
+  checkpoint: "epoch_50.pth"
   visualize: True
+  multi_scale: False
 
 TEST:
-  checkpoint: "epoch_60.pth"
-  result: "./test_dataset/"
+  checkpoint: "epoch_50.pth"
+  result: "./test_output/"
+  multi_scale: False
 
-DIR: "weights/outside15k-resnet50-outsideNet/"
+DIR: "weights/"

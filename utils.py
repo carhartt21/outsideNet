@@ -3,10 +3,26 @@ import os
 import logging
 import re
 import functools
+import collections
+import torch
 import fnmatch
 import numpy as np
 import torch.nn as nn
 from math import ceil
+
+
+def async_copy_to(obj, dev, main_stream=None):
+    if torch.is_tensor(obj):
+        v = obj.cuda(dev, non_blocking=True)
+        if main_stream is not None:
+            v.data.record_stream(main_stream)
+        return v
+    elif isinstance(obj, collections.Mapping):
+        return {k: async_copy_to(o, dev, main_stream) for k, o in obj.items()}
+    elif isinstance(obj, collections.Sequence):
+        return [async_copy_to(o, dev, main_stream) for o in obj]
+    else:
+        return obj
 
 def setup_logger(distributed_rank=0, filename="log.txt"):
     logger = logging.getLogger("Logger")
@@ -23,14 +39,15 @@ def setup_logger(distributed_rank=0, filename="log.txt"):
     return logger
 
 
-def find_recursive(root_dir, ext='.jpg', names_only=False):
+def find_recursive(root_dir, extensions=('jpg', 'png'), names_only=False):
     files = []
     for root, dirnames, filenames in os.walk(root_dir):
-        for filename in fnmatch.filter(filenames, '*' + ext):
-            if names_only:
-                files.append(filename)
-            else:
-                files.append(os.path.join(root, filename))
+        for ext in extensions:
+            for filename in fnmatch.filter(filenames, '*' + ext):
+                if names_only:
+                    files.append(filename)
+                else:
+                    files.append(os.path.join(root, filename))
     return files
 
 
@@ -112,7 +129,7 @@ def unique(ar, return_index=False, return_inverse=False, return_counts=False):
     return ret
 
 
-def colorEncode(labelmap, colors, mode='RGB'):
+def color_encode(labelmap, colors, mode='RGB'):
     labelmap = labelmap.astype('int')
     labelmap_rgb = np.zeros((labelmap.shape[0], labelmap.shape[1], 3),
                             dtype=np.uint8)
@@ -139,22 +156,21 @@ def accuracy(preds, label):
     return acc, valid_sum
 
 
-def intersectionAndUnion(im_pred, im_label, num_class):
-    im_pred = np.asarray(im_pred).copy()
+def intersection_and_union(im_pred, im_label, num_class):
     im_label = np.asarray(im_label).copy()
+    im_pred = np.asarray(im_pred).copy()
 
     im_pred += 1
     im_label += 1
     # Remove classes from unlabeled pixels in gt image.
-    # We should not penalize detections in unlabeled portions of the image.
     im_pred = im_pred * (im_label > 0)
 
-    # Compute area intersection:
+    # Compute intersection:
     intersection = im_pred * (im_pred == im_label)
     (area_intersection, _) = np.histogram(
         intersection, bins=num_class, range=(1, num_class))
 
-    # Compute area union:
+    # Compute union:
     (area_pred, _) = np.histogram(im_pred, bins=num_class, range=(1, num_class))
     (area_lab, _) = np.histogram(im_label, bins=num_class, range=(1, num_class))
     area_union = area_pred + area_lab - area_intersection

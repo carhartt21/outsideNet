@@ -1,30 +1,31 @@
-# System libs
-import os
 import argparse
-from distutils.version import LooseVersion
+import csv
 import json
-# Numerical libs
+import logging
+import os
+from distutils.version import LooseVersion
+
 import numpy as np
 import torch
 import torch.nn as nn
-import csv
-import logging
-# Our libs
-from dataset import TestDataset
-from models import ModelBuilder, SegmentationModule
-from model import outsideNet
-from utils import colorEncode, find_recursive, setup_logger
-from lib.nn import user_scattered_collate, async_copy_to
-from lib.utils import as_numpy
 from PIL import Image
 from tqdm import tqdm
+
 from config import cfg
-from models.modelsummary import get_model_summary
+from dataset import TestDataset
+from lib.utils import as_numpy
+from model import outside_net
+from model.modelsummary import get_model_summary
+from utils import async_copy_to, color_encode, find_recursive, setup_logger
+
+
+def user_scattered_collate(batch):
+    return batch
 
 def visualize_result(data, pred, cfg):
     colors = []
     names = {}
-    with open(cfg.DATASET.classInfo) as f:
+    with open(cfg.DATA.class_info) as f:
         cls_info = json.load(f)
     for c in cls_info:
         names[c] = cls_info[c]['name']
@@ -43,7 +44,7 @@ def visualize_result(data, pred, cfg):
             print("  {}: {:.2f}%".format(name, ratio))
 
     # colorize prediction
-    pred_color = colorEncode(pred, colors).astype(np.uint8)
+    pred_color = color_encode(pred, colors).astype(np.uint8)
 
     # aggregate images and save
     im_vis = np.concatenate((img, pred_color), axis=1)
@@ -61,23 +62,29 @@ def test(segmentation_module, loader, gpu):
         # process data
         batch_data = batch_data[0]
         label_size = (batch_data['img_ori'].shape[0],
-                    batch_data['img_ori'].shape[1])
+                      batch_data['img_ori'].shape[1])
         img_resized_list = batch_data['img_data']
-
         with torch.no_grad():
-            scores = torch.zeros(1, cfg.DATASET.num_class, label_size[0], label_size[1])
+            scores = torch.zeros(1, cfg.DATA.num_class, label_size[0], label_size[1])
             scores = async_copy_to(scores, gpu)
-
-            for img in img_resized_list:
+            if cfg.TEST.multi_scale:
+                for img in img_resized_list:
+                    feed_dict = batch_data.copy()
+                    feed_dict['img_data'] = img
+                    del feed_dict['img_ori']
+                    del feed_dict['info']
+                    feed_dict = async_copy_to(feed_dict, gpu)
+                    # forward pass
+                    pred_tmp = segmentation_module(feed_dict, label_size=label_size)
+                    scores += pred_tmp / len(cfg.DATA.img_sizes)
+                _, pred = torch.max(scores, dim=1)
+            else:
                 feed_dict = batch_data.copy()
-                feed_dict['img_data'] = img
+                feed_dict['img_data'] = batch_data['img_data']
                 del feed_dict['img_ori']
                 del feed_dict['info']
                 feed_dict = async_copy_to(feed_dict, gpu)
-                # forward pass
-                pred_tmp = segmentation_module(feed_dict, label_size=label_size)
-                scores += pred_tmp / len(cfg.DATASET.imgSizes)
-            _, pred = torch.max(scores, dim=1)
+                _, pred = torch.max(segmentation_module(feed_dict, label_size=label_size), dim=1)
             pred = as_numpy(pred.squeeze(0).cpu())
 
         # visualization
@@ -87,24 +94,21 @@ def test(segmentation_module, loader, gpu):
 
 def main(cfg, gpu):
     torch.cuda.set_device(gpu)
-    dump_model = False
-
     crit = nn.NLLLoss(ignore_index=-1)
-    network = outsideNet(
+    network = outside_net(
         crit,
         fc_dim=cfg.MODEL.fc_dim,
-        num_class=cfg.DATASET.num_class,
-        weights_resNet=cfg.MODEL.weights_encoder,
-        weights=cfg.MODEL.weights_decoder,
-        spatial_mask=cfg.MODEL.spatial_mask,
-        use_softmax=True
+        num_class=cfg.DATA.num_class,
+        weights_resnet=cfg.MODEL.weights_encoder,
+        weights_outsidenet=cfg.MODEL.weights_decoder,
     )
 
     # Dataset and Loader
     dataset_test = TestDataset(
         cfg.list_test,
-        cfg.DATASET, 
-        spatial_mask=cfg.MODEL.spatial_mask)
+        cfg.DATA,
+        multi_scale=cfg.TEST.multi_scale
+    )
     loader_test = torch.utils.data.DataLoader(
         dataset_test,
         batch_size=cfg.TEST.batch_size,
@@ -115,9 +119,9 @@ def main(cfg, gpu):
 
     network.cuda()
 
-    if dump_model:
+    if cfg.DATA.dump_model:
         dump_input = torch.rand((1, 3, 1920, 1080))
-        with open('dump_model.txt', 'w') as file:
+        with open('{}.txt'.format(cfg.DATA.dump_model, 'w+')) as file:
             file.write(get_model_summary(network.cuda(), dump_input.cuda(), verbose=True))
 
     # Main loop
@@ -141,7 +145,7 @@ if __name__ == '__main__':
     )
     parser.add_argument(
         "--cfg",
-        default="config/ade20k-resnet50dilated-ppm_deepsup.yaml",
+        default="config/outside15k-resnet50-outsideNet.yaml",
         metavar="FILE",
         help="path to config file",
         type=str,
@@ -150,7 +154,7 @@ if __name__ == '__main__':
         "--gpu",
         default=0,
         type=int,
-        help="gpu id for evaluation"
+        help="gpu id"
     )
     parser.add_argument(
         "opts",

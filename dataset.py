@@ -1,29 +1,14 @@
-import os
 import json
-import torch
+import os
+
 import matplotlib.pyplot as plt
+import numpy as np
+import torch
+from PIL import Image
 from scipy.ndimage import zoom
 from torchvision import transforms, utils
-import numpy as np
-from PIL import Image
-from utils import create_spatial_mask_mask
 
-#  Helper function to show a batch
-def show_batch(sample_batched):
-    """Show image with segmentation for a batch of samples."""
-    images_batch, segm_batch = sample_batched['img_data'], sample_batched['seg_label']
-    # im_size = images_batch.size(2)
-    fig = plt.figure()
-    grid1 = utils.make_grid(images_batch)
-    grid2 = utils.make_grid(segm_batch)
-    fig.add_subplot(grid2.numpy().transpose((1, 2, 0)))
-    plt.imshow(grid1.numpy().transpose((1, 2, 0)))
-    fig.add_subplot(1, 2, 1)
-    plt.imshow(grid2.numpy().transpose((1, 2, 0)))
-    plt.title('Batch from dataloader')
-    plt.axis('off')
-    plt.ioff()
-    plt.show()
+from utils import create_spatial_mask
 
 
 def imresize(im, size, interp='bilinear'):
@@ -42,8 +27,8 @@ def imresize(im, size, interp='bilinear'):
 class BaseDataset(torch.utils.data.Dataset):
     def __init__(self, odgt, opt, **kwargs):
         # parse options
-        self.imgSizes = opt.imgSizes
-        self.imgMaxSize = opt.imgMaxSize
+        self.img_sizes = opt.img_sizes
+        self.img_max_size = opt.img_max_size
         # max down sampling rate of network to avoid rounding during conv or pooling
         self.padding_constant = opt.padding_constant
 
@@ -170,10 +155,10 @@ class TrainDataset(BaseDataset):
         batch_records = self._get_sub_batch()
 
         # resize all images' short edges to the chosen size
-        if isinstance(self.imgSizes, list) or isinstance(self.imgSizes, tuple):
-            this_short_size = np.random.choice(self.imgSizes)
+        if isinstance(self.img_sizes, list) or isinstance(self.img_sizes, tuple):
+            this_short_size = np.random.choice(self.img_sizes)
         else:
-            this_short_size = self.imgSizes
+            this_short_size = self.img_sizes
 
         # calculate the BATCH's height and width
         # since we concat more than one samples, the batch's h and w shall be larger than EACH sample
@@ -183,7 +168,7 @@ class TrainDataset(BaseDataset):
             img_height, img_width = batch_records[i]['height'], batch_records[i]['width']
             this_scale = min(
                 this_short_size / min(img_height, img_width),
-                self.imgMaxSize / max(img_height, img_width))
+                self.img_max_size / max(img_height, img_width))
             batch_widths[i] = img_width * this_scale
             batch_heights[i] = img_height * this_scale
 
@@ -217,27 +202,24 @@ class TrainDataset(BaseDataset):
 
             # creating spatial_mask mask
             if self.spatial_mask:
-                mask = create_spatial_mask_mask(img.size, (3, 1))
+                mask = create_spatial_mask(img.size, (3, 1))
                 assert(img.size[0] == mask.shape[1])
                 assert(img.size[1] == mask.shape[0])
             # random_crop
-            if (self.rand_crop and max(img.size) > max(batch_size) * 2 
+            if (self.rand_crop and max(img.size) > max(batch_size) * 2
                     and np.random.choice([0, 1], p=[0.7, 0.3])):
-                # print('random crop')
                 if self.spatial_mask:
                     img, segm, mask = self.rand_scale_crop(img, segm, batch_size, mask)
                 else:
                     img, segm = self.rand_scale_crop(img, segm, batch_size)
             # random_flip
             if self.rand_flip and np.random.choice([0, 1], p=[0.7, 0.3]):
-                # print('random flip')
                 img = img.transpose(Image.FLIP_LEFT_RIGHT)
                 segm = segm.transpose(Image.FLIP_LEFT_RIGHT)
                 if self.spatial_mask:
                     mask = np.flip(mask, 1)
             assert(img.size[0] > 0)
             assert(img.size[1] > 0)
-            # note that each sample within a mini batch has different scale param
             img = imresize(img, (batch_widths[i], batch_heights[i]), interp='bilinear')
             segm = imresize(segm, (batch_widths[i], batch_heights[i]), interp='nearest')
             assert(img.size[0] == segm.size[0])
@@ -279,72 +261,14 @@ class TrainDataset(BaseDataset):
         return output
 
     def __len__(self):
-        return int(1e10)  # fake length due to the trick that every loader maintains its own list
-        # return self.num_sample
-
-
-class ValDataset(BaseDataset):
-    def __init__(self, root_dataset, odgt, opt, spatial_mask=False, **kwargs):
-        super(ValDataset, self).__init__(odgt, opt, **kwargs)
-        self.root_dataset = root_dataset
-        self.spatial_mask = spatial_mask
-
-    def __getitem__(self, index):
-        this_record = self.list_sample[index]
-        # load image and label
-        image_path = os.path.join(self.root_dataset, this_record['fpath_img'])
-        segm_path = os.path.join(self.root_dataset, this_record['fpath_segm'])
-        img = Image.open(image_path).convert('RGB')
-        segm = Image.open(segm_path)
-        assert(segm.mode == "L")
-        assert(img.size[0] == segm.size[0])
-        assert(img.size[1] == segm.size[1])
-
-        ori_width, ori_height = img.size
-
-        img_resized_list = []
-        for this_short_size in self.imgSizes:
-            # calculate target height and width
-            scale = min(this_short_size / float(min(ori_height, ori_width)),
-                        self.imgMaxSize / float(max(ori_height, ori_width)))
-            target_height, target_width = int(ori_height * scale), int(ori_width * scale)
-            # to avoid rounding in network
-            target_width = self.round2nearest_multiple(target_width, self.padding_constant)
-            target_height = self.round2nearest_multiple(target_height, self.padding_constant)
-            # resize images
-            img_resized = imresize(img, (target_width, target_height), interp='bilinear')
-            # resize spatial_mask mask
-            if self.spatial_mask:
-                mask = create_spatial_mask_mask((target_width, target_height))
-                assert(img_resized.size[0] == mask.shape[1])
-                assert(img_resized.size[1] == mask.shape[0])
-                # image transform, to torch float tensor 4xHxW
-                img_resized = self.img_transform_v2(img_resized, mask)
-            else:
-                # image transform, to torch float tensor 3xHxW
-                img_resized = self.img_transform(img_resized)
-            img_resized = torch.unsqueeze(img_resized, 0)
-            img_resized_list.append(img_resized)
-
-        # segm transform, to torch long tensor HxW
-        segm = self.segm_transform(segm)
-        batch_segms = torch.unsqueeze(segm, 0)
-
-        output = dict()
-        output['img_ori'] = np.array(img)
-        output['img_data'] = [x.contiguous() for x in img_resized_list]
-        output['seg_label'] = batch_segms.contiguous()
-        output['info'] = this_record['fpath_img']
-        return output
-
-    def __len__(self):
         return self.num_sample
 
 
 class TestDataset(BaseDataset):
-    def __init__(self, odgt, opt, spatial_mask=False, **kwargs):
+    def __init__(self, odgt, opt, spatial_mask=False, multi_scale=False, **kwargs):
         super(TestDataset, self).__init__(odgt, opt, **kwargs)
         self.spatial_mask = spatial_mask
+        self.multi_scale = multi_scale
 
     def __getitem__(self, index):
         this_record = self.list_sample[index]
@@ -353,36 +277,50 @@ class TestDataset(BaseDataset):
         img = Image.open(image_path).convert('RGB')
 
         ori_width, ori_height = img.size
+        if self.multi_scale:
+            img_resized_list = []
+            for this_short_size in self.img_sizes:
+                # calculate target height and width
+                scale = min(this_short_size / float(min(ori_height, ori_width)),
+                            self.img_max_size / float(max(ori_height, ori_width)))
+                target_height, target_width = int(ori_height * scale), int(ori_width * scale)
+                print('scale: {}, height: {}, width: {}'.format(scale, target_height, target_width))
+                # to avoid rounding in network
+                target_width = self.round2nearest_multiple(target_width, self.padding_constant)
+                target_height = self.round2nearest_multiple(target_height, self.padding_constant)
 
-        img_resized_list = []
-        for this_short_size in self.imgSizes:
-            # calculate target height and width
-            scale = min(this_short_size / float(min(ori_height, ori_width)),
-                        self.imgMaxSize / float(max(ori_height, ori_width)))
-            target_height, target_width = int(ori_height * scale), int(ori_width * scale)
-            print('scale: {}, height: {}, width: {}'.format(scale, target_height, target_width))
-            # to avoid rounding in network
-            target_width = self.round2nearest_multiple(target_width, self.padding_constant)
-            target_height = self.round2nearest_multiple(target_height, self.padding_constant)
-
-            # resize images
-            img_resized = imresize(img, (target_width, target_height), interp='bilinear')
+                # resize images
+                img_resized = imresize(img, (target_width, target_height), interp='bilinear')
+                if self.spatial_mask:
+                    mask = create_spatial_mask((target_width, target_height))
+                    assert(img_resized.size[0] == mask.shape[1])
+                    assert(img_resized.size[1] == mask.shape[0])
+                    img = self.img_transform_v2(img_resized, mask)
+                else:
+                    # image transform, to torch float tensor 3xHxW
+                    img_resized = self.img_transform(img_resized)
+                img_resized = torch.unsqueeze(img_resized, 0)
+                img_resized_list.append(img_resized)
+            output = dict()
+            output['img_ori'] = np.array(img)
+            output['img_data'] = [x.contiguous() for x in img_resized_list]
+            output['info'] = this_record['fpath_img']
+        else:
             if self.spatial_mask:
-                mask = create_spatial_mask_mask((target_width, target_height))
-                assert(img_resized.size[0] == mask.shape[1])
-                assert(img_resized.size[1] == mask.shape[0])
-                # image transform, to torch float tensor 4xHxW
-                img_resized = self.img_transform_v2(img_resized, mask)
+                mask = create_spatial_mask((img.size[1], img.size[0]))
+                assert(img.size[0] == mask.shape[1])
+                assert(img.size[1] == mask.shape[0])
+                _img = self.img_transform_v2(img, mask)
             else:
                 # image transform, to torch float tensor 3xHxW
-                img_resized = self.img_transform(img_resized)
-            img_resized = torch.unsqueeze(img_resized, 0)
-            img_resized_list.append(img_resized)
-
-        output = dict()
-        output['img_ori'] = np.array(img)
-        output['img_data'] = [x.contiguous() for x in img_resized_list]
-        output['info'] = this_record['fpath_img']
+                _img = self.img_transform(img)
+            print('before: {}'.format(_img.size()))
+            _img = torch.unsqueeze(_img, 0)
+            print('after: {}'.format(_img.size()))
+            output = dict()
+            output['img_ori'] = np.array(img)
+            output['img_data'] = _img.contiguous()
+            output['info'] = this_record['fpath_img']
         return output
 
     def __len__(self):

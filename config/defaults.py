@@ -10,26 +10,29 @@ _C.DIR = "weights/outside15k-resnet50-outsideNet"
 # -----------------------------------------------------------------------------
 # Dataset
 # -----------------------------------------------------------------------------
-_C.DATASET = CN()
-_C.DATASET.root_dataset = "./data/"
-_C.DATASET.list_train = "./data/training.odgt"
-_C.DATASET.list_val = "./data/validation.odgt"
-_C.DATASET.list_stats = ""
-_C.DATASET.num_class = 150
-# multiscale train/test, size of short edge (int or tuple)
-_C.DATASET.imgSizes = (300, 375, 450, 525, 600)
+_C.DATA = CN()
+_C.DATA.root_dataset = "./data/"
+_C.DATA.list_train = "./data/training.odgt"
+_C.DATA.list_val = "./data/validation.odgt"
+_C.DATA.list_stats = "./data/training.odgt"
+_C.DATA.num_class = 24
+# multi_scale train/test, size of short edge (int or tuple)
+_C.DATA.img_sizes = (300, 400, 500, 700, 800)
 # maximum input image size of long edge
-_C.DATASET.imgMaxSize = 1000
+_C.DATA.img_max_size = 1000
 # maxmimum downsampling rate of the network
-_C.DATASET.padding_constant = 8
+_C.DATA.padding_constant = 8
 # downsampling rate of the segmentation label
-_C.DATASET.segm_downsampling_rate = 8
+_C.DATA.segm_downsampling_rate = 8
 # randomly horizontally flip images when train/test
-_C.DATASET.random_flip = True
+_C.DATA.random_flip = True
 # randomly crop images if the size exceeds the maximum size
-_C.DATASET.random_crop = True
+_C.DATA.random_crop = True
 # info file
-_C.DATASET.classInfo = "./data/outside15k.json"
+_C.DATA.class_info = "./data/outside15k.json"
+# dump information to output file
+_C.DATA.dump_model = ""
+
 
 # -----------------------------------------------------------------------------
 # Model
@@ -39,13 +42,9 @@ _C.MODEL = CN()
 _C.MODEL.arch_encoder = "resnet50"
 # architecture of net_decoder
 _C.MODEL.arch_decoder = "outsideNet"
-# weights to finetune net_encoder
-_C.MODEL.weights_encoder = ""
-# weights to finetune net_decoder
-_C.MODEL.weights_decoder = ""
 # number of feature channels between encoder and decoder
 _C.MODEL.fc_dim = 2048
-# use spatial mask
+# utilization of spatial mask
 _C.MODEL.spatial_mask = False
 # align corners during upsampling
 _C.MODEL.align_corners = False
@@ -54,16 +53,18 @@ _C.MODEL.align_corners = False
 # Training
 # -----------------------------------------------------------------------------
 _C.TRAIN = CN()
-_C.TRAIN.batch_size_per_gpu = 2
+_C.TRAIN.batch_size_per_gpu = 1
 # epochs to train for
 _C.TRAIN.num_epoch = 20
 # epoch to start training. useful if continuing from checkpoint
 _C.TRAIN.start_epoch = 0
 # iterations of each epoch (irrelevant to batch size)
 _C.TRAIN.epoch_iters = 5000
-
+# optimizer
 _C.TRAIN.optim = "SGD"
+# initial learning rate for encoder
 _C.TRAIN.lr_encoder = 0.02
+# initial learning rate for decoder
 _C.TRAIN.lr_decoder = 0.02
 # power in poly to drop LR
 _C.TRAIN.lr_pow = 0.9
@@ -89,15 +90,17 @@ _C.TRAIN.best_score = 0
 _C.TRAIN.optim_data = ""
 
 # -----------------------------------------------------------------------------
-# Validation
+# Evaluation
 # -----------------------------------------------------------------------------
-_C.VAL = CN()
+_C.EVAL = CN()
 # currently only supports 1
-_C.VAL.batch_size = 1
+_C.EVAL.batch_size = 1
 # output visualization during validation
-_C.VAL.visualize = False
+_C.EVAL.visualize = False
 # the checkpoint to evaluate on
-_C.VAL.checkpoint = "epoch_20.pth"
+_C.EVAL.checkpoint = "epoch_20.pth"
+# use multi scale for evaluation
+_C.EVAL.multi_scale = False
 
 # -----------------------------------------------------------------------------
 # Testing
@@ -109,3 +112,5 @@ _C.TEST.batch_size = 1
 _C.TEST.checkpoint = "epoch_20.pth"
 # folder to output visualization results
 _C.TEST.result = "./"
+# use multi scale for testing
+_C.TEST.multi_scale = False
