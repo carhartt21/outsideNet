@@ -1,7 +1,5 @@
 import argparse
-import csv
 import json
-import logging
 import os
 from distutils.version import LooseVersion
 

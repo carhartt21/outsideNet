@@ -2,8 +2,8 @@ import torch
 import torch.nn as nn
 import math
 from .utils import load_url
-BatchNorm2d = torch.nn.BatchNorm2d
 
+BatchNorm2d = torch.nn.BatchNorm2d
 
 def conv3x3(in_planes, out_planes, stride=1):
     "3x3 convolution with padding"

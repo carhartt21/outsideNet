@@ -1,4 +1,3 @@
-# outsideNet/dataset.py: 7
 # outsideNet/test.py: 11
 Pillow == 5.1.0
 
