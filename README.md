@@ -1,14 +1,21 @@
-# outsideNet - CVPR2021 (#8678)
+# outsideNet - MMSP 2021 (#164)
+
+
 ###
-This is the code for the submission #8678 at CVPR 2021. 
-We provide the pytorch implementation of our model, pretrained weights for the OUTSIDE15K data set and 30 random sample images for testing. 
+This is the code for the submission __#164__ at __MMSP 2021__. 
+
+We provide the pytorch implementation of our model, pretrained weights for the OUTSIDE15K data set and 30 randomly sampled images for testing.
+We also provide high resolution versions of the figures in the paper and additional images in the folder `figures`.
+
+![Network architecture](/figures/outside15k-network-architecture.png)
+
 ## Run the code
 ### Requirements
 Python: >3.2
 
 CUDA: 10.2
 
-To install the required python packages you can run: 
+To install the required python packages run: 
 ```
 pip install -r requirements.txt
 ```
