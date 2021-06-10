@@ -1,4 +1,4 @@
 weights/
 *pyc
 test_output/
-./.vscode
+.vscode/
